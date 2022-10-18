@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
-#ifndef BMC_REQUEST_HPP
-#define BMC_REQUEST_HPP
+#pragma once
 
 #include <fastcgi++/http.hpp>
+#include <service/session.hpp>
 
 #include <memory>
-
-#include <service/session.hpp>
 
 namespace app
 {
@@ -33,10 +31,13 @@ class IRequest
      * @brief Checks the input HTTP request headers
      */
     virtual bool validate() = 0;
+    virtual const std::string getUriPath() const = 0;
+    virtual const std::string getClientIp() const = 0;
 
     virtual void setSession(const service::session::UserSessionPtr&) = 0;
     virtual const service::session::UserSessionPtr& getSession() const = 0;
     virtual bool isSessionEmpty() const = 0;
+    virtual bool isBrowserRequest() const = 0;
 };
 
 /**
@@ -63,12 +64,16 @@ class Request : public IRequest
     const Environment<char>& environment() const override;
     const Environment<char>& environment() override;
 
+    const std::string getUriPath() const override;
+    const std::string getClientIp() const override;
+
     /** @overload */
     bool validate() override;
 
     void setSession(const service::session::UserSessionPtr&) override;
     const service::session::UserSessionPtr& getSession() const override;
     bool isSessionEmpty() const override;
+    bool isBrowserRequest() const override;
 };
 
 using RequestUni = std::unique_ptr<IRequest>;
@@ -77,5 +82,3 @@ using RequestPtr = std::shared_ptr<IRequest>;
 } // namespace core
 
 } // namespace app
-
-#endif //! BMC_REQUEST_HPP

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
-#ifndef __EXCEPTIONS_H__
-#define __EXCEPTIONS_H__
+#pragma once
 
 #include <stdexcept>
 #include <string>
@@ -23,7 +22,7 @@ class ObmcAppException : public std::runtime_error
     virtual ~ObmcAppException() = default;
 };
 
-class NotImplemented: public ObmcAppException
+class NotImplemented : public ObmcAppException
 {
   public:
     explicit NotImplemented(const std::string& target) :
@@ -33,7 +32,7 @@ class NotImplemented: public ObmcAppException
     virtual ~NotImplemented() = default;
 };
 
-class InvalidType: public ObmcAppException
+class InvalidType : public ObmcAppException
 {
   public:
     explicit InvalidType(const std::string& member) :
@@ -46,5 +45,3 @@ class InvalidType: public ObmcAppException
 } // namespace exceptions
 } // namespace core
 } // namespace app
-
-#endif // __EXCEPTIONS_H__

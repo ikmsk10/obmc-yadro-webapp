@@ -18,6 +18,7 @@ project_issues_url = project_url + '/issues/new'
 summary('Issues',project_issues_url, section: 'Report Issues')
 
 cmake = import('cmake')
+subdir('tools')
 
 # Validate the c++ Standard
 
@@ -65,7 +66,6 @@ add_project_arguments(
   '-Wunused',
   '-Woverloaded-virtual',
   '-Wconversion',
-  '-Wsign-conversion',
   '-Wno-attributes',
   ]),
   language: 'cpp'
@@ -137,13 +137,6 @@ if (cxx.get_id() == 'gcc' and cxx.version().version_compare('>8.0'))
       endif
     endif
   endif
-
-  summary(
-    {
-      'log-level' : get_option('bmc-logging')
-    },
-    section : 'Enabled Features'
-  )
 endif
 
 # Set Compiler Security flags
@@ -176,39 +169,34 @@ atomic =  cxx.find_library('atomic', required: true)
 openssl = dependency('openssl', required : true)
 threads = dependency('threads')
 
-sdbusplus = dependency('sdbusplus',required : false)
-if not sdbusplus.found()
-  sdbusplus_proj = subproject('sdbusplus', required: true)
-  sdbusplus = sdbusplus_proj.get_variable('sdbusplus_dep')
-  sdbusplus = sdbusplus.as_system('system')
-endif
-obmc_webapp_dependencies += sdbusplus
-
+sdbusplus_dep = dependency('sdbusplus')
 systemd = dependency('systemd', required : true)
 zlib = dependency('zlib', required : true)
+phosphor_logging_dep = dependency('phosphor-logging')
+pam = cxx.find_library('pam', required: true)
+uuid = dependency('uuid', required: true)
 
 fastcgipp = cxx.find_library('fastcgipp', required : false)
 if not fastcgipp.found()
-  fastcgipp_cmake_opt = cmake.subproject_options()
-  fastcgipp_cmake_opt.append_compile_args('cpp', '-Wno-error=unused-parameter', '-Wno-error=sign-conversion', '-Wno-error=pedantic')
-  fastcgipp_proj  = cmake.subproject('fastcgi++', options: fastcgipp_cmake_opt, required: true)
+  fastcgipp_proj  = cmake.subproject('fastcgi++', required: true)
   fastcgipp = fastcgipp_proj.dependency('fastcgipp')
 endif
 obmc_webapp_dependencies += fastcgipp
 
-graphqlparser = cxx.find_library('graphqlparser', required : false)
-if not graphqlparser.found()
-  graphqlparser_cmake_opt = cmake.subproject_options()
-  graphqlparser_cmake_opt.append_compile_args('cpp', '-Wno-error=unused-parameter')
-  graphqlparser = cmake.subproject('graphqlparser', options: graphqlparser_cmake_opt, required: true)
-  graphqlparser = graphqlparser.dependency('graphqlparser')
-  graphqlparser_inc = declare_dependency(
-    include_directories: ['subprojects', 'subprojects/graphqlparser']
-  )
-  obmc_webapp_dependencies += [graphqlparser_inc]
-endif
-obmc_webapp_dependencies += [graphqlparser]
-obmc_webapp_dependencies += [atomic, openssl, systemd, zlib, threads]
+graphqlparser = cxx.find_library('graphqlparser', required : true)
+
+obmc_webapp_dependencies += [
+  atomic,
+  openssl,
+  systemd,
+  zlib,
+  threads,
+  graphqlparser,
+  sdbusplus_dep,
+  phosphor_logging_dep,
+  pam,
+  uuid,
+]
 
 if cxx.has_header('nlohmann/json.hpp')
     nlohmann_json = declare_dependency()
@@ -243,16 +231,18 @@ srcfiles_obmc_webapp = [
   'src/core/request.cpp',
   'src/core/router.cpp',
   'src/routes.cpp',
-  'src/queries.cpp',
+  'src/service/session.cpp',
   # protocol handlers
   'src/core/route/handlers/graphql_handler.cpp',
   # entities
   'src/core/entity/entity.cpp',
+  'src/core/entity/entity_manager.cpp',
   'src/core/entity/dbus_query.cpp',
   # brokers
-  'src/core/broker/dbus_broker.cpp',
-  # target entities
-  'src/system_queries.cpp',
+  'src/core/connect/dbus_connect.cpp',
+  # Redfish
+  'src/core/route/redfish/response.cpp',
+  'src/core/route/redfish/error_messages.cpp',
 ]
 
 srcfiles_unittest = [
@@ -276,7 +266,9 @@ summary(
 conf_data = configuration_data()
 conf_data.set('MESON_INSTALL_PREFIX',get_option('prefix'))
 conf_data.set('HTTP_REQ_BODY_LIMIT_MB',get_option('http-body-limit'))
-conf_data.set('BMC_LOGGING_LEVEL',get_option('bmc-logging'))
+conf_data.set('FASTCGI_SOCKET_PATH', '"' + get_option('fcgi-socket-path') + '"')
+conf_data.set('YAWEB_INIT_GUARD_FILE', '"' + get_option('yaweb-init-guard-file') + '"')
+
 if get_option('dbus-connect-type') == 'remote'
   conf_data.set('BMC_DBUS_REMOTE_HOST','"' + get_option('dbus-remote-host') + '"')
   summary(
@@ -287,9 +279,6 @@ if get_option('dbus-connect-type') == 'remote'
 )
 endif
 
-if cxx.has_header('phosphor-logging/log.hpp')
-  conf_data.set('LOG_ENGINE_PHOSPHOR', '')
-endif
 conf_data.set(dbus_connect_types[get_option('dbus-connect-type')], true)
 
 configure_file(output: 'config.h', configuration: conf_data)
@@ -299,6 +288,12 @@ configure_file(output: 'config.h', configuration: conf_data)
 systemd_system_unit_dir = systemd.get_pkgconfig_variable('systemdsystemunitdir')
 
 bindir = get_option('prefix') + '/' +get_option('bindir')
+
+configure_file(input : 'yaweb.service.in',
+               output : 'yaweb.service',
+               install_dir: systemd_system_unit_dir,
+               configuration: conf_data,
+               install : true)
 
 summary({
           'prefix' : get_option('prefix'),

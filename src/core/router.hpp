@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
-#ifndef BMC_ROUTER_HPP
-#define BMC_ROUTER_HPP
+#pragma once
 
+#include <core/helpers/utils.hpp>
 #include <core/request.hpp>
 #include <core/response.hpp>
+#include <phosphor-logging/log.hpp>
 
 #include <memory>
 #include <string>
@@ -20,21 +21,35 @@ class Router;
 
 using RouteHandlerPtr = std::shared_ptr<IRouteHandler>;
 using RouteUni = std::unique_ptr<Router>;
+using UriSegments = std::vector<std::string>;
+
+using namespace phosphor::logging;
 
 class IRouteHandler
 {
   public:
-    virtual void run(const RequestPtr& request, ResponseUni& response) = 0;
+    virtual const ResponsePtr run(const RequestPtr& request) = 0;
     virtual bool preHandlers(const RequestPtr& request) = 0;
-
     virtual ~IRouteHandler() = default;
+};
+
+class IDynamicRouteHandler
+{
+  public:
+    virtual ~IDynamicRouteHandler() = default;
 };
 
 class Router
 {
-    using RoutePattern = std::string;
-    using RouteHandlerBuilderFn = std::function<RouteHandlerPtr(const std::string&)>;
+    using RoutePattern = std::size_t;
+    using RouteHandlerBuilderFn =
+        std::function<RouteHandlerPtr(const std::string&)>;
+    using DynamicRoutePatternFn = std::function<bool(const UriSegments&)>;
+    using DynamicRouteHandlerBuilderFn =
+        std::function<RouteHandlerPtr(const RequestPtr&)>;
     using RouteMap = std::map<RoutePattern, RouteHandlerBuilderFn>;
+    using DynamicRouteMap = std::vector<
+        std::pair<DynamicRoutePatternFn, DynamicRouteHandlerBuilderFn>>;
 
   public:
     explicit Router(const RequestPtr& request);
@@ -48,12 +63,7 @@ class Router
 
     virtual ~Router() = default;
 
-    const ResponseUni& getResponse() const
-    {
-        return responseObject;
-    }
-
-    const ResponseUni& process();
+    const ResponsePtr process();
     bool preHandler();
 
     template <class THandler, typename... TArg>
@@ -61,10 +71,36 @@ class Router
     {
         static_assert(std::is_base_of_v<IRouteHandler, THandler>,
                       "Unexpected URI handler");
-        Router::routerHandlers.emplace(
-            pattern, [&](const std::string pattern) -> RouteHandlerPtr {
-                return std::make_shared<THandler>(pattern, args...);
-            });
+        const std::string uri = helpers::utils::toLower(pattern);
+        auto hashPattern = std::hash<std::string>{}(uri);
+        auto routerBuilder = [&](const std::string pattern) -> RouteHandlerPtr {
+            return std::make_shared<THandler>(pattern, args...);
+        };
+        auto isRegistered =
+            Router::routerHandlers.emplace(hashPattern, routerBuilder).second;
+        if (!isRegistered)
+        {
+            throw std::runtime_error("The route URI '" + pattern +
+                                     "' already registered");
+        }
+    }
+
+    template <class THandler>
+    static void registerDynamicUri(DynamicRoutePatternFn rule)
+    {
+        static_assert(std::is_base_of_v<IDynamicRouteHandler, THandler>,
+                      "Unexpected dynamic URI handler");
+        auto routerBuilder = [&](const RequestPtr& request) -> RouteHandlerPtr {
+            return std::make_shared<THandler>(request);
+        };
+        auto isRegistered =
+            Router::dynamicRouterHandlers.emplace_back(rule, routerBuilder)
+                .second;
+        if (!isRegistered)
+        {
+            throw std::runtime_error(
+                "The dynamic route URI already registered");
+        }
     }
 
   protected:
@@ -78,16 +114,13 @@ class Router
         return requestObject;
     }
 
-    ResponseUni& getResponse()
-    {
-        return responseObject;
-    }
+    void setGeneralHeaders(const ResponsePtr);
 
   private:
     RequestPtr requestObject;
-    ResponseUni responseObject;
 
     static RouteMap routerHandlers;
+    static DynamicRouteMap dynamicRouterHandlers;
 
     RouteHandlerPtr handler;
 };
@@ -95,5 +128,3 @@ class Router
 } // namespace core
 
 } // namespace app
-
-#endif //! BMC_ROUTER_HPP

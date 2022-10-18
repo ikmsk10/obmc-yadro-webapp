@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
+#include "assert.h"
+
 #include <core/application.hpp>
+#include <core/entity/dbus_query.hpp>
 #include <core/entity/entity.hpp>
 
 namespace app
@@ -10,69 +13,102 @@ namespace entity
 {
 
 using namespace exceptions;
+using namespace phosphor::logging;
 
-const MemberName Entity::EntityMember::getName() const noexcept
+const MemberName BaseEntity::EntityMember::getName() const noexcept
 {
     return name;
 }
 
 const IEntity::IEntityMember::InstancePtr&
-    Entity::EntityMember::getInstance() const
+    BaseEntity::EntityMember::getInstance() const
 {
     return this->instance;
 }
 
-void Entity::Relation::addConditionBuildRules(const RelationRulesList& rules)
+void BaseEntity::Relation::addConditionBuildRules(
+    const RelationRulesList& rules)
 {
     conditionBuildRules.insert(conditionBuildRules.end(), rules.begin(),
                                rules.end());
 }
 
-const EntityPtr Entity::Relation::getDestinationTarget() const
+const EntityPtr BaseEntity::Relation::getDestinationTarget() const
 {
     return destination;
 }
 
 const std::vector<IEntity::ConditionPtr>
-    Entity::Relation::getConditions(InstanceHash sourceInstanceHash) const
+    BaseEntity::Relation::getConditions(InstanceHash sourceInstanceHash) const
 {
     std::vector<IEntity::ConditionPtr> conditions;
-    for(auto [memberSource, memberDest, compareLiteral]: conditionBuildRules)
+    for (auto [memberSource, memberDest, compareLiteral] : conditionBuildRules)
     {
+        if (memberSource == dummyField)
+        {
+            conditions.emplace_back(
+                std::make_shared<Condition>(memberDest, compareLiteral));
+            continue;
+        }
         auto sourceMember = this->source.lock()->getMember(memberSource);
-        auto sourceInstance = this->source.lock()->getInstance(sourceInstanceHash);
+        auto sourceInstance =
+            this->source.lock()->getInstance(sourceInstanceHash);
         if (!sourceMember || !sourceInstance)
         {
             // to be certain that we haven't invalid pointers
+            assert("Some pointers of important object are invalid");
             continue;
         }
-        auto compareValue =
-            sourceInstance->getField(sourceMember)->getValue();
+        auto compareValue = sourceInstance->getField(sourceMember)->getValue();
 
-        BMC_LOG_DEBUG << "[RELATION] ADD RULE FOR CONDITION: " << memberDest
-                      << "=" << std::get<std::string>(compareValue);
-
-        auto condition = std::make_shared<Entity::Condition>();
-        condition->addRule(memberDest, compareValue, compareLiteral);
-        conditions.push_back(condition);
+        log<level::DEBUG>("Acquire conditions for rule",
+                          entry("DEST_MEMBER=%s", memberDest.c_str()));
+        conditions.emplace_back(std::make_shared<Condition>(
+            memberDest, compareValue, compareLiteral));
     }
     return std::forward<const std::vector<IEntity::ConditionPtr>>(conditions);
 }
 
-IEntity::IRelation::LinkWay Entity::Relation::getLinkWay() const
+const std::vector<IEntity::ConditionPtr>
+    BaseEntity::Relation::getConditions(const InstancePtr instance) const
+{
+    return std::forward<const std::vector<IEntity::ConditionPtr>>(
+        getConditions(instance->getHash()));
+}
+
+const IEntity::InstanceCollection
+    BaseEntity::StaticInstance::getRelatedInstances(
+        const IEntity::RelationPtr relation, const ConditionsList& conditions,
+        bool skipEmpty) const
+{
+    if (!relation)
+    {
+        return {};
+    }
+    auto relConditions = relation->getConditions(getHash());
+    relConditions.insert(relConditions.end(), conditions.begin(),
+                         conditions.end());
+    if (skipEmpty && relConditions.empty())
+    {
+        return {};
+    }
+    return relation->getDestinationTarget()->getInstances(relConditions);
+}
+
+IEntity::IRelation::LinkWay BaseEntity::Relation::getLinkWay() const
 {
     // TODO(IK) should we remove the LinkWay abstraction?
     return linkWay;
 }
 
-const IEntity::IEntityMember::InstancePtr& Entity::StaticInstance::getField(
+const IEntity::IEntityMember::InstancePtr& BaseEntity::StaticInstance::getField(
     const IEntity::EntityMemberPtr& entityMember) const
 {
     return getField(entityMember->getName());
 }
 
-const IEntity::IEntityMember::InstancePtr&
-    Entity::StaticInstance::getField(const MemberName& entityMemberName) const
+const IEntity::IEntityMember::InstancePtr& BaseEntity::StaticInstance::getField(
+    const MemberName& entityMemberName) const
 {
     auto findInstanceIt = memberInstances.find(entityMemberName);
     if (findInstanceIt == memberInstances.end())
@@ -83,10 +119,10 @@ const IEntity::IEntityMember::InstancePtr&
     return findInstanceIt->second;
 }
 
-const std::vector<MemberName> Entity::StaticInstance::getMemberNames() const
+const std::vector<MemberName> BaseEntity::StaticInstance::getMemberNames() const
 {
     std::vector<MemberName> result;
-    for (auto& [memberName, memberInstance] : memberInstances)
+    for (const auto& [memberName, memberInstance] : memberInstances)
     {
         result.emplace_back(memberName);
     }
@@ -94,7 +130,7 @@ const std::vector<MemberName> Entity::StaticInstance::getMemberNames() const
     return std::forward<const std::vector<MemberName>>(result);
 }
 
-void Entity::StaticInstance::supplement(
+void BaseEntity::StaticInstance::supplement(
     const MemberName& member,
     const IEntity::IEntityMember::IInstance::FieldType& value)
 {
@@ -106,8 +142,9 @@ void Entity::StaticInstance::supplement(
     }
 }
 
-void Entity::StaticInstance::supplementOrUpdate(const MemberName& memberName,
-                                const IEntity::IEntityMember::IInstance::FieldType& value)
+void BaseEntity::StaticInstance::supplementOrUpdate(
+    const MemberName& memberName,
+    const IEntity::IEntityMember::IInstance::FieldType& value)
 {
     if (hasField(memberName))
     {
@@ -118,126 +155,161 @@ void Entity::StaticInstance::supplementOrUpdate(const MemberName& memberName,
     supplement(memberName, value);
 }
 
-void Entity::StaticInstance::supplementOrUpdate(
+void BaseEntity::StaticInstance::supplementOrUpdate(
     const IEntity::InstancePtr& destination)
 {
-    BMC_LOG_DEBUG << "count destination members: "
-                  << destination->getMemberNames().size();
-    for (auto& memberName : destination->getMemberNames())
+    for (const auto& memberName : destination->getMemberNames())
     {
         this->supplementOrUpdate(memberName,
                                  destination->getField(memberName)->getValue());
     }
 }
 
-bool Entity::StaticInstance::hasField(const MemberName& memberName) const
+bool BaseEntity::StaticInstance::hasField(const MemberName& memberName) const
 {
     return memberInstances.find(memberName) != memberInstances.end();
 }
 
-bool Entity::StaticInstance::checkCondition(
+bool BaseEntity::StaticInstance::checkCondition(
     const IEntity::ConditionPtr condition) const
 {
-    BMC_LOG_DEBUG << "Checking condition";
     return !condition || condition->check(*this);
 }
 
-const std::map<std::size_t, IEntity::InstancePtr> Entity::StaticInstance::getComplex() const
+const std::map<std::size_t, IEntity::InstancePtr>
+    BaseEntity::StaticInstance::getComplex() const
 {
     return std::map<std::size_t, IEntity::InstancePtr>();
 }
 
-bool Entity::StaticInstance::isComplex() const
+bool BaseEntity::StaticInstance::isComplex() const
 {
     return false;
 }
 
-void Entity::StaticInstance::initDefaultFieldsValue()
+void BaseEntity::StaticInstance::initDefaultFieldsValue()
 {
     // nothing to do
 }
 
-std::size_t Entity::StaticInstance::getHash() const
+std::size_t BaseEntity::StaticInstance::getHash() const
 {
     auto hash = std::hash<std::string>{}(identity);
     return hash;
 }
 
 const IEntity::IEntityMember::InstancePtr&
-    Entity::StaticInstance::instanceNotFound() const
+    BaseEntity::StaticInstance::instanceNotFound() const
 {
     static IEntity::IEntityMember::InstancePtr notAvailable =
-        std::make_shared<Entity::EntityMember::StaticInstance>(
-            std::string(Entity::EntityMember::fieldValueNotAvailable));
+        std::make_shared<Entity::EntityMember::StaticInstance>();
 
     return notAvailable;
 }
 
-void Entity::Condition::addRule(
+void BaseEntity::Condition::addRule(
     const MemberName& destinationMember,
     const IEntity::IEntityMember::IInstance::FieldType& value,
     CompareCallback compareCallback)
 {
-    this->rules.push_back(
-        std::make_pair(std::make_pair(destinationMember, value), compareCallback));
+    this->rules.emplace_back(std::make_pair(destinationMember, value),
+                             compareCallback);
 }
 
-bool Entity::Condition::check(const IEntity::IInstance& sourceInstance) const
+void BaseEntity::Condition::addRule(const MemberName& destinationMember,
+                                    CustomCompareCallback compareCallback)
+{
+    this->rules.emplace_back(
+        std::make_pair(destinationMember, std::nullptr_t(nullptr)),
+        [compareCallback](const IEntityMember::InstancePtr& instance,
+                          const IEntityMember::IInstance::FieldType&) {
+            return compareCallback(instance);
+        });
+}
+
+bool BaseEntity::Condition::check(
+    const IEntity::IInstance& sourceInstance) const
 {
     return fieldValueCompare(sourceInstance);
 }
 
-bool Entity::Condition::fieldValueCompare(
+bool BaseEntity::Condition::fieldValueCompare(
     const IEntity::IInstance& sourceInstance) const
 {
     bool result = true;
-    for (auto& [ruleMeta, compareCallback] : rules)
+    for (const auto& [ruleMeta, compareCallback] : rules)
     {
         MemberName memberName;
         IEntityMember::IInstance::FieldType rightValue;
         std::tie(memberName, rightValue) = ruleMeta;
-        auto memberInstance = sourceInstance.getField(memberName);
+        IEntity::IEntityMember::InstancePtr memberInstance;
+        if (IRelation::dummyField != memberName)
+        {
+            memberInstance = sourceInstance.getField(memberName);
+        }
         result &= std::invoke(compareCallback, memberInstance, rightValue);
     }
     return result;
 }
 
-bool Entity::addMember(const EntityMemberPtr& member)
+BaseEntity::BaseEntity() noexcept
 {
-    if (!member)
+    this->createMember(app::query::dbus::metaObjectPath);
+    this->createMember(app::query::dbus::metaObjectService);
+}
+
+bool BaseEntity::addMember(const EntityMemberPtr& memberPtr)
+{
+    if (!memberPtr)
     {
         throw EntityException(
             "Invalid member pattern. The passed memeber is empty");
     }
 
-    bool initialized = members.emplace(member->getName(), member).second;
+    bool initialized = members.emplace(memberPtr->getName(), memberPtr).second;
     if (!initialized)
     {
-        BMC_LOG_WARNING << "Invalid member pattern. The " + member->getName() +
-                           " member of object already registered";
+        log<level::DEBUG>(
+            "Invalid pattern to add member of entity.",
+            entry("ENTITY=%s", this->getName().c_str()),
+            entry("MEMBER=%s", memberPtr->getName().c_str()),
+            entry("DESC=%s", "Member of object already registered"));
     }
 
     return initialized;
 }
 
-const EntityName Entity::getName() const noexcept
+bool BaseEntity::createMember(const MemberName& member)
 {
-    return this->name;
+    return addMember(std::make_shared<Entity::EntityMember>(member));
 }
 
 const IEntity::EntityMemberPtr
-    Entity::getMember(const MemberName& memberName) const
+    BaseEntity::getMember(const MemberName& memberName) const
 {
     auto it = this->members.find(memberName);
     if (it == this->members.end())
     {
+        const auto& providersRules = getProviders();
+        for (auto [provider, _] : providersRules)
+        {
+            try
+            {
+                return provider->getMember(memberName);
+            }
+            catch (EntityException&)
+            {
+                // don't handle this excecption, there is the first-level
+                // exception bellow
+            }
+        }
         throw EntityException("The object Member <" + memberName +
                               "> not found");
     }
     return it->second;
 }
 
-const IEntity::InstancePtr Entity::getInstance(std::size_t hash) const
+const IEntity::InstancePtr BaseEntity::getInstance(std::size_t hash) const
 {
     auto findInstanceIt = this->instances.find(hash);
     if (findInstanceIt == instances.end())
@@ -249,21 +321,25 @@ const IEntity::InstancePtr Entity::getInstance(std::size_t hash) const
 }
 
 const std::vector<IEntity::InstancePtr>
-    Entity::getInstances(const ConditionsList& conditions) const
+    BaseEntity::getInstances(const ConditionsList& conditions) const
 {
     // FIXME need optimization to prevent high load on CPU per request
     std::vector<IEntity::InstancePtr> result;
-    for (auto [_, instanceObject] : instances)
+    for (const auto [_, instanceObject] : instances)
     {
         instanceObject->initDefaultFieldsValue();
 
         auto complexInstances = instanceObject->getComplex();
         complexInstances.insert_or_assign(instanceObject->getHash(),
                                           instanceObject);
-        for (auto [_, instance] : complexInstances)
+        for (const auto [_, instance] : complexInstances)
         {
-            for (auto& provider : this->providers)
+            const auto& providers = getProviders();
+            for (auto provider : providers)
             {
+                log<level::DEBUG>(
+                    "Supplement instance by provider",
+                    entry("PROVIDER=%s", provider.first->getName().c_str()));
                 provider.first->supplementInstance(instance, provider.second);
             }
             bool conditionPassed = true;
@@ -285,84 +361,144 @@ const std::vector<IEntity::InstancePtr>
     return std::forward<const std::vector<IEntity::InstancePtr>>(result);
 }
 
-void Entity::setInstances(std::vector<InstancePtr> instancesList)
+void BaseEntity::setInstances(std::vector<InstancePtr> instancesList)
 {
-    instances.clear();
-    for (auto& inputInstance : instancesList)
+    for (const auto& inputInstance : instancesList)
     {
         this->instances.insert_or_assign(inputInstance->getHash(),
                                          inputInstance);
     }
 }
 
-IEntity::InstancePtr Entity::mergeInstance(InstancePtr instance)
+IEntity::InstancePtr BaseEntity::mergeInstance(InstancePtr instance)
 {
     InstancesHashmap::iterator foundIt = instances.find(instance->getHash());
     if (foundIt == instances.end())
     {
-        BMC_LOG_DEBUG << "[MERGING] Insert new instance";
-        this->instances.insert_or_assign(instance->getHash(),
-                                         instance);
+        this->instances.insert_or_assign(instance->getHash(), instance);
         return instance;
     }
-    BMC_LOG_DEBUG << "[MERGING] Supplement";
     foundIt->second->supplementOrUpdate(instance);
     return foundIt->second;
 }
 
-void Entity::removeInstance(InstanceHash hash)
+void BaseEntity::removeInstance(InstanceHash hash)
 {
     auto instance = this->instances.extract(hash);
-    BMC_LOG_DEBUG << "Remove instance: " << hash << " of entity " << this->getName()
-              << " is OK";
+    log<level::DEBUG>("Entity instance successfully removed",
+                      entry("INSTANCE_HASH=%ld", hash),
+                      entry("ENTITY=%s", getName().c_str()));
 }
 
-void Entity::linkSupplementProvider(
-    const EntitySupplementProviderPtr& provider,
-    ISupplementProvider::ProviderLinkRule linkRule)
+const std::vector<IEntity::RelationPtr>& BaseEntity::getRelations() const
 {
-    BMC_LOG_DEBUG << "Link provider: " << provider->getName();
-    providers.push_back(std::make_pair(provider, linkRule));
+    static const Relations noRelations;
+    return noRelations;
 }
 
-void Entity::addRelation(const RelationPtr relation)
+void BaseEntity::initialize()
 {
-    using namespace std::literals;
-    if (!relation)
+    log<level::DEBUG>("Entity initialize",
+                      entry("ENTITY=%s", getName().c_str()));
+    resetCache();
+    initMembers();
+    initRelations();
+    initProviders();
+}
+
+void BaseEntity::initMembers()
+{
+    const auto membersNames = getMembersNames();
+    log<level::DEBUG>("Entity members initialize",
+                      entry("ENTITY=%s", getName().c_str()),
+                      entry("MEMBERS_CNT=%ld", membersNames.size()));
+    for (auto member : membersNames)
     {
-        BMC_LOG_ERROR << "Attempt to register nullptr_t of the relation object.";
-        return;
+        createMember(member);
     }
-
-    BMC_LOG_DEBUG << "The entity " << this->getName() << " will accept to the "
-              << relation->getDestinationTarget()->getName()
-              << "destination entity";
-
-    relations.push_back(relation);
 }
 
-const std::vector<IEntity::RelationPtr>& Entity::getRelations() const
+void BaseEntity::initRelations()
+{}
+
+void BaseEntity::initProviders()
 {
-    return relations;
+    for (auto providerRule : getProviders())
+    {
+        providerRule.first->initialize();
+    }
 }
 
-Entity::Type Entity::getType() const
+void BaseEntity::processQueries()
 {
-    return Type::object;
+    log<level::DEBUG>("Processing entity queries",
+                      entry("ENTITY=%s", getName().c_str()));
+    try
+    {
+        for (auto provider : getProviders())
+        {
+            provider.first->processQueries();
+        }
+        for (auto query : getQueries())
+        {
+            configure(query);
+            setInstances(query->process());
+        }
+    }
+    catch (sdbusplus::exception::SdBusError& ex)
+    {
+        log<level::ERR>("Failed to process entity queries",
+                        entry("ENTITY=%s", getName().c_str()),
+                        entry("ERROR=%s", ex.what()));
+    }
+}
+
+void BaseEntity::resetCache()
+{
+    this->instances.clear();
+
+    for (auto provider : getProviders())
+    {
+        provider.first->resetCache();
+    }
+}
+
+const BaseEntity::MembersList BaseEntity::getMembersNames() const
+{
+    BaseEntity::MembersList membersList;
+    for (auto query : getQueries())
+    {
+        for (auto memberName : query->getFields())
+        {
+            membersList.emplace_back(memberName);
+        }
+    }
+    return std::forward<Entity::MembersList>(membersList);
+}
+
+const BaseEntity::ProviderRulesDict& BaseEntity::getProviders() const
+{
+    static const BaseEntity::ProviderRulesDict noProviders;
+    return noProviders;
 }
 
 const IEntity::RelationPtr
-    Entity::getRelation(const EntityName& entityName) const
+    BaseEntity::getRelation(const EntityName& entityName) const
 {
-    BMC_LOG_DEBUG << "Count relations: " << relations.size();
-    for (auto relation: relations)
+    const auto& relations = getRelations();
+    log<level::DEBUG>("Get relation for destination entity",
+                      entry("ENTITY=%s", getName().c_str()),
+                      entry("DESTINATION=%s", entityName.c_str()),
+                      entry("TOTAL_RELS=%ld", relations.size()));
+    for (auto relation : relations)
     {
-        BMC_LOG_DEBUG << "Check relation relations: "
-                      << relation->getDestinationTarget()->getName();
         if (relation->getDestinationTarget()->getName() == entityName)
         {
             // force update instance before checking relations
-            relation->getDestinationTarget()->fillEntity();
+            log<level::DEBUG>("Entity relation found",
+                              entry("ENTITY=%s", getName().c_str()),
+                              entry("DESTINATION=%s", entityName.c_str()),
+                              entry("TOTAL_RELS=%ld", relations.size()));
             return relation;
         }
     }
@@ -370,150 +506,25 @@ const IEntity::RelationPtr
     return RelationPtr();
 }
 
+const EntityManager& BaseEntity::getEntityManager()
+{
+    return app::core::application.getEntityManager();
+}
+
 void EntitySupplementProvider::supplementInstance(
-    IEntity::InstancePtr& entityInstance, ProviderLinkRule linkRuleFn)
+    const IEntity::InstancePtr& entityInstance, ProviderLinkRule linkRuleFn)
 {
-    for (auto supplementInstance : this->getInstances())
+    const auto providerInstance = this->getInstances();
+    for (auto instance : providerInstance)
     {
-        std::invoke(linkRuleFn, supplementInstance, entityInstance);
+        std::invoke(linkRuleFn, instance, entityInstance);
     }
 }
 
-EntityManager::EntityBuilder& EntityManager::EntityBuilder::addMembers(
-    const std::vector<std::string>& memberNames)
-{
-    for (const auto& memberName : memberNames)
-    {
-        entity->addMember(std::make_shared<Entity::EntityMember>(memberName));
-    }
-    return *this;
-}
-
-EntityManager::EntityBuilder&
-    EntityManager::EntityBuilder::linkSupplementProvider(
-        const std::string& providerName,
-        IEntity::ISupplementProvider::ProviderLinkRule linkRule)
-{
-    using namespace app::entity::obmc::definitions;
-    auto findProviderIt = providers.find(providerName);
-    if (findProviderIt == providers.end())
-    {
-        throw exceptions::EntityException(
-            "Requested provider is not registered: " + providerName);
-    }
-
-    this->entity->linkSupplementProvider(findProviderIt->second, linkRule);
-
-    auto providerMembers =
-        this->entityManager.getProvider(providerName)->getMembers();
-    for (auto [memberName, memberInstance] : providerMembers)
-    {
-        if (memberName.starts_with(metaFieldPrefix))
-        {
-            continue;
-        }
-        this->entity->addMember(memberInstance);
-    }
-
-    return *this;
-}
-
-EntityManager::EntityBuilder&
-    EntityManager::EntityBuilder::linkSupplementProvider(
-        const std::string& providerName)
-{
-    using namespace std::placeholders;
-
-    this->linkSupplementProvider(
-        providerName,
-        std::bind(&EntityManager::EntityBuilder::defaultLinkProvider, _1, _2));
-    return *this;
-}
-
-EntityManager::EntityBuilder& EntityManager::EntityBuilder::addRelations(
-    const std::string& destinationEntityName,
-    const IEntity::IRelation::RelationRulesList& ruleBuilders)
-{
-    auto destinationEntity =
-        this->entityManager.getEntity(destinationEntityName, false);
-
-    auto relation =
-        std::make_shared<Entity::Relation>(this->entity, destinationEntity);
-
-    relation->addConditionBuildRules(ruleBuilders);
-    entity->addRelation(relation);
-    return *this;
-}
-
-void EntityManager::EntityBuilder::defaultLinkProvider(
-    const IEntity::InstancePtr& supplement, const IEntity::InstancePtr& target)
+void BaseEntity::defaultLinkProvider(const IEntity::InstancePtr& supplement,
+                                     const IEntity::InstancePtr& target)
 {
     target->supplementOrUpdate(supplement);
-}
-
-EntityManager::EntityBuilderPtr EntityManager::buildSupplementProvider(
-    const std::string& supplementProviderName)
-{
-    auto provider =
-        std::make_shared<EntitySupplementProvider>(supplementProviderName);
-    supplementProviders.emplace(supplementProviderName, provider);
-    auto builder = std::make_shared<EntityManager::EntityBuilder>(
-        std::move(provider), supplementProviders, *this);
-    return std::forward<EntityManager::EntityBuilderPtr>(builder);
-}
-
-EntityManager::EntityBuilderPtr
-    EntityManager::buildCollection(const std::string& name)
-{
-    return std::forward<EntityManager::EntityBuilderPtr>(
-        buildEntity<Collection>(name));
-}
-
-EntityManager::EntityBuilderPtr
-    EntityManager::buildEntity(const std::string& name)
-{
-    return std::forward<EntityManager::EntityBuilderPtr>(
-        buildEntity<Entity>(name));
-}
-
-void EntityManager::addEntity(EntityPtr entity)
-{
-    if (!entityDictionary.emplace(entity->getName(), std::move(entity)).second)
-    {
-        throw exceptions::EntityException(
-            "The name of object already registered. Object name is " +
-            entity->getName());
-    }
-}
-
-const EntityPtr EntityManager::getEntity(const std::string& entityName,
-                                         bool forceFillInstances) const
-{
-    auto it = entityDictionary.find(entityName);
-    if (it == entityDictionary.end())
-    {
-        throw EntityException("The Object <" + entityName + "> not found");
-    }
-    if (forceFillInstances)
-    {
-        it->second->fillEntity();
-    }
-    return it->second;
-}
-
-const EntityPtr EntityManager::getProvider(const EntityName& providerName) const
-{
-    auto it = supplementProviders.find(providerName);
-    if (it == supplementProviders.end())
-    {
-        throw EntityException("The Provider <" + providerName + "> not found");
-    }
-    return it->second;
-}
-
-Collection::Type Collection::getType() const
-{
-    return Type::array;
 }
 
 } // namespace entity

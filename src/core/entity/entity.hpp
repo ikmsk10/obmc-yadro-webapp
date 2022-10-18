@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
-#ifndef __ENTITY_H__
-#define __ENTITY_H__
+#pragma once
 
+#include <core/entity/entity_interface.hpp>
+#include <core/entity/entity_manager.hpp>
 #include <core/exceptions.hpp>
-#include <logger/logger.hpp>
+#include <phosphor-logging/log.hpp>
 
-#include <definitions.hpp>
-
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -22,33 +22,12 @@ namespace app
 namespace entity
 {
 
-/**
- * The Entity is a most central abstraction which describes a user-consumption
- * payload. The IEntity interface defines the user-object, e.g. Server, Sensors,
- * Chassis, etc.
- * Also, the defined data should be stored in someplace, and that
- * is 'IInstance' abstraction, which the IEntity includes. The described IEntity
- * wants to have a description of its own fields, which is IEntityMebmber.
- * Like the IEntity has the IInstance, the IEntityMember also has its own
- * IInstance containing the Fields value.
- */
+using namespace phosphor::logging;
+using namespace std::chrono;
 
-class IEntity;
-class IEntityMapper;
-class EntityManager;
 class EntitySupplementProvider;
 class Collection;
-
-using EntityPtr = std::shared_ptr<IEntity>;
-using EntityPtrConst = std::shared_ptr<const IEntity>;
-using EntityWeak = std::weak_ptr<IEntity>;
-using EntityManagerPtr = std::shared_ptr<EntityManager>;
-using EntityManagerUni = std::unique_ptr<EntityManager>;
 using EntitySupplementProviderPtr = std::shared_ptr<EntitySupplementProvider>;
-
-using EntityName = std::string;
-using MemberName = std::string;
-
 namespace exceptions
 {
 
@@ -63,239 +42,117 @@ class EntityException : public core::exceptions::ObmcAppException
 
 } // namespace exceptions
 
-class IEntity
+class BaseEntity : virtual public IEntity
 {
-  public:
-    class IEntityMember;
-    class IInstance;
-    class ISupplementProvider;
-    class IRelation;
-    class ICondition;
+#define ENTITY_DECL_QUERY(...)                                                 \
+    const query::QueryCollection& getQueries() const override                  \
+    {                                                                          \
+        static const query::QueryCollection queries{__VA_ARGS__};              \
+        return queries;                                                        \
+    }
 
-    using EntityMemberPtr = std::shared_ptr<IEntity::IEntityMember>;
-    using EntityMemberPtrConst = std::shared_ptr<const IEntity::IEntityMember>;
-    using InstancePtr = std::shared_ptr<IInstance>;
-    using InstancePtrConst = std::shared_ptr<const IInstance>;
-    using RelationPtr = std::shared_ptr<IRelation>;
-    using ConditionPtr = std::shared_ptr<ICondition>;
-    using ConditionsList = std::vector<ConditionPtr>;
+#define ENTITY_PROVIDER_LINK(prv, link)                                        \
+    {                                                                          \
+        prv::getSingleton(), link                                              \
+    }
+#define ENTITY_PROVIDER_LINK_DEFAULT(prv)                                      \
+    ENTITY_PROVIDER_LINK(prv, defaultLinkProvider)
+#define ENTITY_DECL_PROVIDERS(...)                                             \
+    const ProviderRulesDict& getProviders() const override                     \
+    {                                                                          \
+        static const Entity::ProviderRulesDict providers{__VA_ARGS__};         \
+        return providers;                                                      \
+    }
 
-    using MemberMap = std::map<const std::string, EntityMemberPtr>;
-    using InstanceHash = std::size_t;
+#define ENTITY_DEF_RELATION(dest, rules)                                       \
+    Relation::build<dest>(getEntityManager().getEntity(getName()), rules)
+#define ENTITY_DEF_RELATION2(dest, rules)                                      \
+    Relation::build(getEntityManager().getEntity(getName()),                   \
+                    getEntityManager().getEntity(#dest), rules)
 
-    enum class Type {
-        object,
-        array,
-        reference
-    };
+#define ENTITY_DEF_RELATION_DIRECT(dest)                                       \
+    ENTITY_DEF_RELATION(dest, IRelation::directLinkingRule())
+#define ENTITY_DEF_RELATION_DIRECT2(dest)                                      \
+    ENTITY_DEF_RELATION2(dest, IRelation::directLinkingRule())
 
-    class IEntityMember
-    {
-      public:
-        class IInstance;
-        using InstancePtr = std::shared_ptr<IInstance>;
-        using InstancePtrConst = std::shared_ptr<const IInstance>;
+#define ENTITY_DECL_RELATIONS(...)                                             \
+    const std::vector<IEntity::RelationPtr>& getRelations() const override     \
+    {                                                                          \
+        static const Relations relations{__VA_ARGS__};                         \
+        return relations;                                                      \
+    }
 
-        class IInstance
-        {
-          public:
-            using FieldType =
-                std::variant<std::vector<std::string>, std::vector<double>,
-                             std::string, int64_t, uint64_t, double, int32_t,
-                             uint32_t, int16_t, uint16_t, uint8_t, bool>;
+#define ENTITY_DECL_RESET_FIELD(name)                                          \
+    static void resetField##name(const InstancePtr instance)                   \
+    {                                                                          \
+        instance->supplementOrUpdate(field##name, std::nullptr_t(nullptr));    \
+    }
+#define ENTITY_DECL_FIELD_DEF(type, name, defval)                              \
+    static constexpr const char* field##name = #name;                          \
+    static type getField##name(const InstancePtr instance)                     \
+    {                                                                          \
+        const auto fieldPtr = instance->getField(field##name);                 \
+        if (fieldPtr->isNull())                                                \
+        {                                                                      \
+            return defval;                                                     \
+        }                                                                      \
+        const auto& value = fieldPtr->getValue();                              \
+        return std::get<type>(value);                                          \
+    }                                                                          \
+    static void setField##name(const InstancePtr instance, const type& value)  \
+    {                                                                          \
+        instance->supplementOrUpdate(field##name, value);                      \
+    }                                                                          \
+    ENTITY_DECL_RESET_FIELD(name)
 
-            virtual const FieldType& getValue() const noexcept = 0;
-            virtual const std::string& getStringValue() const = 0;
-            virtual int getIntValue() const = 0;
-            virtual double getFloatValue() const = 0;
-            virtual bool getBoolValue() const = 0;
+#define ENTITY_DECL_FIELD(type, name)                                          \
+    ENTITY_DECL_FIELD_DEF(type, name,                                          \
+                          Entity::EntityMember::fieldValueNotAvailable)
 
-            virtual void setValue(const FieldType&) = 0;
+#define ENTITY_DECL_FIELD_ENUM(type, name, defval)                             \
+    static constexpr const char* field##name = #name;                          \
+    static type getField##name(const InstancePtr instance)                     \
+    {                                                                          \
+        const auto fieldPtr = instance->getField(field##name);                 \
+        if (fieldPtr->isNull())                                                \
+        {                                                                      \
+            return type::defval;                                               \
+        }                                                                      \
+        const auto& value = fieldPtr->getValue();                              \
+        if constexpr (!std::is_enum_v<type>)                                   \
+        {                                                                      \
+            throw std::logic_error("The defined entity field is not enum");    \
+        }                                                                      \
+        return static_cast<type>(std::get<int>(value));                        \
+    }                                                                          \
+    static void setField##name(const InstancePtr instance, const type& value)  \
+    {                                                                          \
+        if constexpr (!std::is_enum_v<type>)                                   \
+        {                                                                      \
+            throw std::logic_error("The defined entity field is not enum");    \
+        }                                                                      \
+        instance->supplementOrUpdate(field##name, static_cast<int>(value));    \
+    }                                                                          \
+    ENTITY_DECL_RESET_FIELD(name)
 
-            virtual ~IInstance() = default;
-
-            friend std::ostream& operator<<(std::ostream& os,
-                                            const FieldType& variantValue)
-            {
-                std::visit(
-                    [&os](auto&& value) {
-                        using TProperty = std::decay_t<decltype(value)>;
-                        if constexpr (std::is_same_v<TProperty, std::string> ||
-                                      std::is_arithmetic_v<TProperty>)
-                        {
-                            os << value;
-                        }
-                        else if constexpr (std::is_same_v<TProperty, bool>)
-                        {
-                            os << std::boolalpha << value;
-                        }
-                    },
-                    variantValue);
-                return os;
-            }
-        };
-
-        virtual const std::string getName() const noexcept = 0;
-        virtual const InstancePtr& getInstance() const = 0;
-
-        virtual ~IEntityMember() = default;
-    };
-
-    class IInstance
-    {
-      public:
-        using MemberInstancesMap =
-            std::map<entity::MemberName, IEntity::IEntityMember::InstancePtr>;
-
-        virtual ~IInstance() = default;
-        /**
-         * @brief Get the Field of Entity Instance
-         *
-         * @param entityMemberName - name of an Entity Member to seach the Field
-         *
-         * @return const Entity::IEntityMember::InstancePtr& The Field Instance
-         * of specified Entity Member
-         *
-         */
-        virtual const IEntity::IEntityMember::InstancePtr&
-            getField(const IEntity::EntityMemberPtr&) const = 0;
-
-        virtual const IEntity::IEntityMember::InstancePtr&
-            getField(const MemberName&) const = 0;
-
-        virtual const std::vector<MemberName> getMemberNames() const = 0;
-
-        virtual void supplement(const MemberName&,
-                                const IEntityMember::IInstance::FieldType&) = 0;
-        virtual void supplementOrUpdate(const MemberName&,
-                                const IEntityMember::IInstance::FieldType&) = 0;
-        virtual void supplementOrUpdate(const InstancePtr&) = 0;
-
-        virtual bool hasField(const MemberName& ) const = 0;
-        virtual bool checkCondition(const ConditionPtr) const = 0;
-
-        virtual const std::map<std::size_t, InstancePtr> getComplex() const = 0;
-        virtual bool isComplex() const = 0;
-
-        virtual void initDefaultFieldsValue() = 0;
-        /**
-         * @brief Get the Hash of Entity Instance
-         *
-         * @return std::size_t hash value
-         */
-        virtual std::size_t getHash() const = 0;
-    };
-
-    class ISupplementProvider
-    {
-      public:
-        using ProviderLinkRule = std::function<void(const IEntity::InstancePtr&,
-                                                    const IEntity::InstancePtr&)>;
-
-        virtual ~ISupplementProvider() = default;
-
-        virtual void supplementInstance(IEntity::InstancePtr&,
-                                        ProviderLinkRule) = 0;
-    };
-
-    class ICondition
-    {
-      public:
-        using CompareCallback =
-            std::function<bool(const IEntityMember::InstancePtr&,
-                               const IEntityMember::IInstance::FieldType&)>;
-
-        virtual void addRule(const MemberName&,
-                             const IEntityMember::IInstance::FieldType&,
-                             CompareCallback) = 0;
-
-        virtual bool check(const IEntity::IInstance&) const = 0;
-
-        virtual ~ICondition() = default;
-    };
-
-    class IRelation
-    {
-      public:
-        using RuleSet =
-            std::tuple<MemberName, MemberName, ICondition::CompareCallback>;
-        using RelationRulesList = std::vector<RuleSet>;
-
-        enum class LinkWay : uint8_t
-        {
-            oneToOne,
-            oneToMany,
-            manyToOne,
-            none
-        };
-        virtual ~IRelation() = default;
-
-        virtual const EntityPtr getDestinationTarget() const = 0;
-        virtual const std::vector<ConditionPtr> getConditions(InstanceHash) const = 0;
-
-        virtual LinkWay getLinkWay() const = 0;
-    };
-
-    virtual const EntityName getName() const noexcept = 0;
-
-    virtual bool addMember(const EntityMemberPtr&) = 0;
-
-    virtual const IEntity::EntityMemberPtr
-        getMember(const std::string& memberName) const = 0;
-
-    virtual const MemberMap& getMembers() const = 0;
-
-    virtual bool hasMember(const MemberName&) const = 0;
-
-    virtual const InstancePtr getInstance(std::size_t) const = 0;
-    virtual const std::vector<InstancePtr>
-        getInstances(const ConditionsList& = ConditionsList()) const = 0;
-    virtual void setInstances(std::vector<InstancePtr>) = 0;
-    virtual InstancePtr mergeInstance(InstancePtr) = 0;
-    virtual void removeInstance(InstanceHash) = 0;
-    virtual void
-        linkSupplementProvider(const EntitySupplementProviderPtr&,
-                               ISupplementProvider::ProviderLinkRule) = 0;
-
-    virtual void addRelation(const RelationPtr) = 0;
-    virtual const std::vector<RelationPtr>& getRelations() const = 0;
-    virtual const RelationPtr getRelation(const EntityName&) const = 0;
-
-    virtual void fillEntity() = 0;
-
-    virtual ~IEntity() = default;
-
-    /**
-     * @brief Get Type of the current Entity object.
-     * 
-     * @return IEntity::Type  - The type of Entity. 
-     */
-    virtual IEntity::Type getType() const = 0;
-};
-
-class Entity : public IEntity
-{
-    using ProviderRulesDict =
-        std::vector<std::pair<const EntitySupplementProviderPtr,
-                              ISupplementProvider::ProviderLinkRule>>;
     using InstancesHashmap = std::map<InstanceHash, InstancePtr>;
     MemberMap members;
-    const EntityName name;
     InstancesHashmap instances;
-    ProviderRulesDict providers;
-    std::vector<RelationPtr> relations;
+
+  protected:
+    using ProviderRule = std::pair<EntitySupplementProviderPtr,
+                                   ISupplementProvider::ProviderLinkRule>;
+    using ProviderRulesDict = std::vector<ProviderRule>;
+    using MembersList = std::vector<MemberName>;
 
   public:
     class EntityMember : public IEntityMember
     {
-        const MemberName name;
-        InstancePtr instance;
-
       public:
         static constexpr const char* fieldValueNotAvailable = "N/A";
         class StaticInstance : public IEntityMember::IInstance
         {
-            FieldType value;
+            std::optional<FieldType> value;
 
           public:
             StaticInstance(const StaticInstance&) = delete;
@@ -303,6 +160,7 @@ class Entity : public IEntity
             StaticInstance(StaticInstance&&) = delete;
             StaticInstance& operator=(StaticInstance&&) = delete;
 
+            explicit StaticInstance() noexcept = default;
             explicit StaticInstance(const FieldType& fieldValue) noexcept :
                 value(fieldValue)
             {}
@@ -310,7 +168,8 @@ class Entity : public IEntity
 
             const FieldType& getValue() const noexcept
             {
-                return value;
+                static const FieldType na = std::string(fieldValueNotAvailable);
+                return !isNull() ? value.value() : na;
             }
             void setValue(const FieldType& fieldValue)
             {
@@ -318,19 +177,71 @@ class Entity : public IEntity
             }
             const std::string& getStringValue() const override
             {
-                return std::get<std::string>(value);
+                static const std::string naVal(fieldValueNotAvailable);
+                if (!std::holds_alternative<std::string>(getValue()) ||
+                    isNull())
+                {
+                    return naVal;
+                }
+                return std::get<std::string>(getValue());
             }
             int getIntValue() const override
             {
-                return std::get<int>(value);
+                if (!std::holds_alternative<int>(getValue()) || isNull())
+                {
+                    return 0;
+                }
+                return std::get<int>(getValue());
             }
             double getFloatValue() const override
             {
-                return std::get<double>(value);
+                if (!std::holds_alternative<double>(getValue()) || isNull())
+                {
+                    return 0.0;
+                }
+                return std::get<double>(getValue());
             }
             bool getBoolValue() const override
             {
-                return std::get<bool>(value);
+                if (!std::holds_alternative<bool>(getValue()) || isNull())
+                {
+                    return false;
+                }
+                return std::get<bool>(getValue());
+            }
+            bool isNull() const override
+            {
+                return !value.has_value() ||
+                       std::holds_alternative<nullptr_t>(*value);
+            }
+            const std::string getType() const override
+            {
+                if (isNull())
+                {
+                    return "Null";
+                }
+                auto visitCallback = [](auto&& value) -> const std::string {
+                    using TProperty = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_same_v<std::string, TProperty>)
+                    {
+                        return "String";
+                    }
+                    else if constexpr (std::is_same_v<int, TProperty>)
+                    {
+                        return "Integer";
+                    }
+                    else if constexpr (std::is_same_v<double, TProperty>)
+                    {
+                        return "Double";
+                    }
+                    else if constexpr (std::is_same_v<bool, TProperty>)
+                    {
+                        return "Boolean";
+                    }
+
+                    return "Unknown";
+                };
+                return std::visit(std::move(visitCallback), getValue());
             }
         };
 
@@ -350,13 +261,19 @@ class Entity : public IEntity
         const MemberName getName() const noexcept override;
 
         const InstancePtr& getInstance() const override;
+
+      private:
+        const MemberName name;
+        InstancePtr instance;
     };
 
     class Condition : public ICondition
     {
-        using RuleMeta = std::pair<MemberName, IEntityMember::IInstance::FieldType>;
+        using RuleMeta =
+            std::pair<MemberName, IEntityMember::IInstance::FieldType>;
         using Rule = std::pair<RuleMeta, CompareCallback>;
         std::vector<Rule> rules;
+
       public:
         Condition(const Condition&) = delete;
         Condition& operator=(const Condition&) = delete;
@@ -364,15 +281,64 @@ class Entity : public IEntity
         Condition& operator=(Condition&&) = delete;
 
         explicit Condition() = default;
+        Condition(const MemberName& member,
+                  const IEntityMember::IInstance::FieldType& value,
+                  CompareCallback comparer)
+        {
+            addRule(member, value, comparer);
+        }
+        Condition(const MemberName& member, CustomCompareCallback comparer)
+        {
+            addRule(member, comparer);
+        }
+        Condition(const MemberName& member, CompareCallback comparer)
+        {
+            addRule(member,
+                    [comparer](const IEntityMember::InstancePtr& instance) {
+                        return comparer(instance, nullptr_t(nullptr));
+                    });
+        }
         ~Condition() override = default;
 
         void addRule(const MemberName&,
                      const IEntityMember::IInstance::FieldType&,
                      CompareCallback) override;
 
+        void addRule(const MemberName&, CustomCompareCallback) override;
         bool check(const IEntity::IInstance&) const override;
+
+        template <typename TRightValue>
+        static const ConditionPtr buildEqual(const std::string& fieldName,
+                                             TRightValue value)
+        {
+            return build<Equal<TRightValue>, TRightValue>(fieldName, value);
+        }
+
+        template <typename TRightValue>
+        static const ConditionPtr buildNonEqual(const std::string& fieldName,
+                                                TRightValue value)
+        {
+            return build<NonEqual<TRightValue>, TRightValue>(fieldName, value);
+        }
+
       protected:
         bool fieldValueCompare(const IEntity::IInstance&) const;
+
+        template <class TComparer, typename TRightValue>
+        static const ConditionPtr build(const std::string& fieldName,
+                                        TRightValue value)
+        {
+            if constexpr (std::is_enum_v<TRightValue>)
+            {
+                return std::make_shared<Condition>(
+                    fieldName, static_cast<int>(value), TComparer());
+            }
+            else
+            {
+                return std::make_shared<Condition>(fieldName, value,
+                                                   TComparer());
+            }
+        }
     };
 
     class Relation : public IRelation
@@ -381,6 +347,7 @@ class Entity : public IEntity
         const EntityPtr destination;
         LinkWay linkWay;
         RelationRulesList conditionBuildRules;
+
       public:
         Relation(const Relation&) = delete;
         Relation& operator=(const Relation&) = delete;
@@ -397,8 +364,28 @@ class Entity : public IEntity
         void addConditionBuildRules(const RelationRulesList&);
 
         const EntityPtr getDestinationTarget() const override;
-        const std::vector<ConditionPtr> getConditions(InstanceHash) const override;
+        const std::vector<ConditionPtr>
+            getConditions(InstanceHash) const override;
+        const std::vector<ConditionPtr>
+            getConditions(const InstancePtr) const override;
         LinkWay getLinkWay() const override;
+
+      public:
+        static const RelationPtr build(const EntityPtr source,
+                                       const EntityPtr dest,
+                                       const RelationRulesList& rules)
+        {
+            auto relation = std::make_shared<Relation>(source, dest);
+            relation->addConditionBuildRules(rules);
+            return relation;
+        }
+        template <typename TDestination>
+        static const RelationPtr build(const EntityPtr source,
+                                       const RelationRulesList& rules)
+        {
+            return build(source, getEntityManager().getEntity<TDestination>(),
+                         rules);
+        }
     };
 
     class StaticInstance : public IInstance
@@ -426,8 +413,9 @@ class Entity : public IEntity
 
         const std::vector<MemberName> getMemberNames() const override;
 
-        void supplement(const MemberName&,
-                        const IEntity::IEntityMember::IInstance::FieldType&) override;
+        void supplement(
+            const MemberName&,
+            const IEntity::IEntityMember::IInstance::FieldType&) override;
         void supplementOrUpdate(
             const MemberName&,
             const IEntity::IEntityMember::IInstance::FieldType&) override;
@@ -435,6 +423,10 @@ class Entity : public IEntity
 
         bool hasField(const MemberName&) const override;
         bool checkCondition(const ConditionPtr) const override;
+        const InstanceCollection
+            getRelatedInstances(const RelationPtr,
+                                const ConditionsList& = ConditionsList(),
+                                bool skipEmpty = false) const override;
 
         const std::map<std::size_t, InstancePtr> getComplex() const override;
         bool isComplex() const override;
@@ -452,20 +444,17 @@ class Entity : public IEntity
         MemberInstancesMap memberInstances;
     };
 
-    explicit Entity() = delete;
-    Entity(const Entity&) = delete;
-    Entity& operator=(const Entity&) = delete;
-    Entity(Entity&&) = delete;
-    Entity& operator=(Entity&&) = delete;
+    BaseEntity(const BaseEntity&) = delete;
+    BaseEntity& operator=(const BaseEntity&) = delete;
+    BaseEntity(BaseEntity&&) = delete;
+    BaseEntity& operator=(BaseEntity&&) = delete;
 
-    explicit Entity(const std::string& objectName) noexcept : name(objectName)
-    {
-    }
+    explicit BaseEntity() noexcept;
 
-    ~Entity() override = default;
+    ~BaseEntity() override = default;
 
     bool addMember(const EntityMemberPtr&) override;
-    const std::string getName() const noexcept override;
+    bool createMember(const MemberName& member) override;
 
     const IEntity::EntityMemberPtr
         getMember(const std::string& memberName) const override;
@@ -486,197 +475,280 @@ class Entity : public IEntity
     void setInstances(std::vector<InstancePtr>) override;
     InstancePtr mergeInstance(InstancePtr) override;
     void removeInstance(InstanceHash) override;
-
-    void linkSupplementProvider(const EntitySupplementProviderPtr&,
-                                ISupplementProvider::ProviderLinkRule) override;
-
-    void addRelation(const RelationPtr) override;
-    const std::vector<RelationPtr>& getRelations() const override;
+    const Relations& getRelations() const override;
     const RelationPtr getRelation(const EntityName&) const override;
+    static const EntityManager& getEntityManager();
+
+    void processQueries() override;
 
     /**
-     * @brief Fill the entity from the configured data source.
-     *
-     * The data might come from different places and in different ways.
-     * The end-entity class should configure the way of filling.
+     * @brief Clear a cache of instances
+     * All isntances of entity will be removed
      */
-    void fillEntity() override
+    void resetCache() override;
+    /**
+     * @brief The Entity expect to initialize:
+     *        + Target Entity members
+     *        + Relations to anather Entities
+     */
+    void initialize() override;
+
+  protected:
+    virtual const MembersList getMembersNames() const;
+    virtual const ProviderRulesDict& getProviders() const;
+
+    inline void initMembers();
+    inline void initRelations();
+    inline void initProviders();
+
+  protected:
+    static void defaultLinkProvider(const IEntity::InstancePtr& supplement,
+                                    const IEntity::InstancePtr& target);
+};
+
+template <typename TEntity>
+class NamedEntity : public virtual IEntity
+{
+  public:
+    const EntityName getName() const override
     {
-        // nothing to do in the base entity;
+        int status;
+        char* className;
+        const std::type_info& ti = typeid(TEntity);
+        className = abi::__cxa_demangle(ti.name(), 0, 0, &status);
+        if (status < 0 || !className)
+        {
+            throw core::exceptions::ObmcAppException(
+                "Can't acquire entityName by symbols");
+        }
+        EntityName en(className);
+        auto pos = en.find_last_of("::");
+        if (pos != std::string::npos)
+        {
+            en = en.substr(pos + 1);
+        }
+        free(className);
+        return en;
     }
 
-    Type getType() const override;
+    static const EntityPtr getEntity()
+    {
+        return BaseEntity::getEntityManager().getEntity<TEntity>();
+    }
+
+    ~NamedEntity() override = default;
+};
+
+/**
+ * @class CachedSource
+ * @brief The behavior of populating IEntity data.
+ *        The data should be filled by an cache update engine.
+ */
+class CachedSource : public virtual IEntity
+{
+    bool initialized;
+
+  public:
+    CachedSource() : initialized(false)
+    {}
+    void populate() override
+    {
+        if (!initialized)
+        {
+            resetCache();
+            processQueries();
+        }
+        initialized = true;
+    }
+    void configure(const query::QueryPtr query) override
+    {
+        query->configure(std::ref(*this));
+    }
+    ~CachedSource() override = default;
+};
+
+/**
+ * @class ShortTimeCachedSource
+ * @brief The behavior of populating IEntity data.
+ *        The data will be filled by an cache update engine with a defined
+ *        lifetime.
+ */
+template <int64_t timeToCacheInSec>
+class ShortTimeCachedSource : public virtual IEntity
+{
+    system_clock::time_point cacheTimePoint;
+
+  public:
+    ShortTimeCachedSource() :
+        cacheTimePoint(system_clock::now() - timeToCache())
+    {}
+    void populate() override
+    {
+        if (isCacheExpiried())
+        {
+            resetCache();
+            processQueries();
+            setTimePoint();
+        }
+    }
+    void configure(const query::QueryPtr query) override
+    {
+        query->configure(std::ref(*this));
+    }
+    ~ShortTimeCachedSource() override = default;
+
+  private:
+    void setTimePoint()
+    {
+        this->cacheTimePoint = system_clock::now();
+    }
+
+    inline bool isCacheExpiried() const
+    {
+        std::time_t current = std::time(nullptr);
+        const auto calculated =
+            system_clock::to_time_t(cacheTimePoint + timeToCache());
+        return calculated < current;
+    }
+
+    constexpr const auto timeToCache() const
+    {
+        return std::chrono::seconds(timeToCacheInSec);
+    }
+};
+
+/**
+ * @class LazySource
+ * @brief The behavior of populating IEntity data.
+ *        The data will be filled per request by 'populate()' via configured
+ *        datasource
+ */
+class LazySource : public virtual IEntity
+{
+  public:
+    void populate() override
+    {
+        this->resetCache();
+        this->processQueries();
+    }
+    void configure(const query::QueryPtr) override
+    {}
+    ~LazySource() override = default;
 };
 
 /**
  * @brief Class Collection provides the list of Entities specified object type.
  *        The current abstraction is needed to explicitly define an Entity set.
  */
-class Collection: public Entity
+class Entity : public BaseEntity
 {
   public:
-    explicit Collection() = delete;
+    Entity(const Entity&) = delete;
+    Entity& operator=(const Entity&) = delete;
+    Entity(Entity&&) = delete;
+    Entity& operator=(Entity&&) = delete;
+
+    explicit Entity() noexcept : BaseEntity()
+    {}
+
+    ~Entity() override = default;
+    /**
+     * @brief Get Entity type.
+     *
+     * @return Type IEntity::Type::object
+     */
+    Type getType() const override
+    {
+        return Type::object;
+    }
+
+    bool isNull() const
+    {
+        return this->getInstances().size() == 0;
+    }
+
+    const InstancePtr get() const
+    {
+        const auto instances = this->getInstances();
+        if (instances.size() == 0)
+        {
+            return std::make_shared<StaticInstance>(
+                EntityMember::fieldValueNotAvailable);
+        }
+        else if (instances.size() > 1)
+        {
+            log<level::WARNING>(
+                "The given instance of IEntity is not object type. Please, "
+                "review data source and the entity configuration.",
+                entry("ENTITY=%s", getName().c_str()));
+        }
+
+        return instances.at(0);
+    }
+
+    const InstancePtr operator()() const
+    {
+        return this->get();
+    }
+};
+
+/**
+ * @brief Class Collection provides the list of Entities specified object type.
+ *        The current abstraction is needed to explicitly define an Entity set.
+ */
+class Collection : public BaseEntity
+{
+  public:
     Collection(const Collection&) = delete;
     Collection& operator=(const Collection&) = delete;
     Collection(Collection&&) = delete;
     Collection& operator=(Collection&&) = delete;
 
-    explicit Collection(const std::string& name) noexcept : Entity(name)
-    {
-    }
+    explicit Collection() noexcept : BaseEntity()
+    {}
 
     ~Collection() override = default;
-
-    Type getType() const override;
-};
-
-class EntitySupplementProvider :
-    public Entity,
-    public IEntity::ISupplementProvider
-{
-  public:
-    explicit EntitySupplementProvider(const std::string& providerName) noexcept
-        :
-        Entity(providerName)
-    {}
-    ~EntitySupplementProvider() override = default;
-
-    void supplementInstance(IEntity::InstancePtr& instance,
-                            ProviderLinkRule) override;
-};
-
-class EntityManager final
-{
-    using EntityMap = std::map<const std::string, EntityPtr>;
-    using SupplementProviderDict =
-        std::map<std::string, EntitySupplementProviderPtr>;
-
-  public:
-    class EntityBuilder;
-
-    using EntityBuilderPtr = std::shared_ptr<EntityBuilder>;
-    using EntityBuilderUni = std::unique_ptr<EntityBuilder>;
-
-    EntityManager(const EntityManager&) = delete;
-    EntityManager& operator=(const EntityManager&) = delete;
-    EntityManager(EntityManager&&) = delete;
-    EntityManager& operator=(EntityManager&&) = delete;
-
-    explicit EntityManager() = default;
-    ~EntityManager() = default;
-
-    class EntityBuilder final :
-        public std::enable_shared_from_this<EntityBuilder>
+    /**
+     * @brief Get Colleciton type
+     *
+     * @return Type IEntity::Type::array
+     */
+    Type getType() const override
     {
-        EntityPtr entity;
-        const SupplementProviderDict& providers;
-        EntityManager& entityManager;
-      public:
-        EntityBuilder(const EntityBuilder&) = delete;
-        EntityBuilder& operator=(const EntityBuilder&) = delete;
-        EntityBuilder(EntityBuilder&&) = delete;
-        EntityBuilder& operator=(EntityBuilder&&) = delete;
-
-        explicit EntityBuilder(
-            EntityPtr targetEntity,
-            const SupplementProviderDict& supplementProviders,
-            EntityManager& entityManagerRef) :
-            entity(targetEntity),
-            providers(supplementProviders), entityManager(entityManagerRef)
-        {}
-        ~EntityBuilder() = default;
-
-        template <class TQueryBuilder, typename TBrokerManager>
-        std::shared_ptr<TQueryBuilder> addQuery(TBrokerManager& manager)
-        {
-            return std::make_shared<TQueryBuilder>(shared_from_this(), entity,
-                                                   manager);
-        }
-
-        EntityBuilder& addMembers(const std::vector<std::string>& memberNames);
-
-        EntityBuilder& linkSupplementProvider(
-            const std::string&,
-            IEntity::ISupplementProvider::ProviderLinkRule);
-
-        EntityBuilder& linkSupplementProvider(const std::string&);
-
-        EntityBuilder& addRelations(const std::string&,
-                                    const IEntity::IRelation::RelationRulesList&);
-        protected:
-          static void defaultLinkProvider(const IEntity::InstancePtr&,
-                                          const IEntity::InstancePtr&);
-    };
-
-    EntityBuilderPtr buildSupplementProvider(const std::string&);
-
-    EntityBuilderPtr buildCollection(const std::string&);
-    EntityBuilderPtr buildEntity(const std::string&);
-    template<class TEntity>
-    EntityBuilderPtr buildEntity(const std::string& name)
-    {
-        auto entity = std::make_shared<TEntity>(name);
-        this->addEntity(entity);
-        auto builder = std::make_shared<EntityManager::EntityBuilder>(
-            std::move(entity), supplementProviders, *this);
-        return std::forward<EntityManager::EntityBuilderPtr>(builder);
+        return Type::array;
     }
-
-    void addEntity(EntityPtr entity);
-
-    /**
-     * @brief Get the Objects object
-     *
-     * @param entityName - the entity name to retrieve the corresponding an
-     * Entity Objects instances
-     * @param forceFillInstances - true - with correspoding filling process
-     *                             false - don't update instances.
-     * @return const EntityPtr - Entity object which contains the target
-     * instances
-     */
-    const EntityPtr getEntity(const EntityName& entityName, bool forceFillInstances = true) const;
-
-    /**
-     * @brief Get the Objects object
-     *
-     * @param entityName - the entity name to retrieve the corresponding an
-     * Entity Objects instances
-     * @return const EntityPtr - Entity object which contains the target
-     * instances
-     */
-    const EntityPtr getProvider(const EntityName& entityName) const;
-
-  protected:
-    EntityMap entityDictionary;
-    SupplementProviderDict supplementProviders;
 };
 
 /**
- * @brief The class of mapping the actual Entity literal name with the protocol
- * specific naming.
- *
- * TODO: by actual this abstraction unimplemented. But for the future protocols
- * implementation, e.g. DMTF REDFISH, this is must have.
- *
- * The Entity instances do registered as:
- * + `Entity object literal name` => EntityObject instance
- *    - `Entity Object Member literal name` => EntityObjectMember instance
- *    - ...
- * + ...
- *
- * A some protocols may want to extract the EntityObject/EntityMember by own
- * specific literal naming.
- * The IEntityMapper mappings the requested literal
- * name to the registered literal name.
+ * @class EntitySupplementProvider
+ * @brief The abstraction that contains partial logic of acquire data filling an
+ *        target Entity.
  *
  */
-class IEntityMapper
+class EntitySupplementProvider :
+    public BaseEntity,
+    public IEntity::ISupplementProvider
 {
   public:
-    virtual ~IEntityMapper() = default;
+    explicit EntitySupplementProvider() noexcept : BaseEntity()
+    {}
+    ~EntitySupplementProvider() override = default;
+    /** @inherit */
+    void supplementInstance(const IEntity::InstancePtr& instance,
+                            ProviderLinkRule) override;
+
+    /**
+     * @brief Get Rerefernce type.
+     *        Providers has a formless type that is depends on the requesting
+     *        resources.
+     *
+     * @return Type IEntity::Type::reference
+     */
+    Type getType() const override
+    {
+        return Type::reference;
+    }
 };
 
 } // namespace entity
 } // namespace app
-
-#endif // __ENTITY_H__

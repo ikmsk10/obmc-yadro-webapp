@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2021 YADRO
 
-#ifndef BMC_CONNECTION_HPP
-#define BMC_CONNECTION_HPP
-
-#include <fastcgi++/request.hpp>
-#include <core/response.hpp>
-#include <core/request.hpp>
-#include <core/router.hpp>
+#pragma once
 
 #include <config.h>
+
+#include <core/request.hpp>
+#include <core/response.hpp>
+#include <core/router.hpp>
+#include <fastcgi++/request.hpp>
 
 namespace app
 {
 namespace core
 {
 
-class Connection :public Fastcgipp::Request<char>
+class Connection : public Fastcgipp::Request<char>
 {
-    static constexpr const size_t maxBodySizeByte = (HTTP_REQ_BODY_LIMIT_MB << 20U);
+    static constexpr const size_t maxBodySizeByte =
+        (HTTP_REQ_BODY_LIMIT_MB << 20U);
 
   public:
     Connection();
@@ -37,15 +37,12 @@ class Connection :public Fastcgipp::Request<char>
     bool inProcessor() override;
 
   private:
-    void writeHeader(const ResponseUni&);
     size_t totalBytesRecived;
 
     RequestPtr request;
     RouteUni router;
 };
 
-} // namespace entity
+} // namespace core
 
 } // namespace app
-
-#endif //!BMC_CONNECTION_HPP

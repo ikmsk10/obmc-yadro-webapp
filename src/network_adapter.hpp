@@ -3,136 +3,119 @@
 
 #pragma once
 
+#include <common_fields.hpp>
 #include <core/entity/dbus_query.hpp>
 #include <core/entity/entity.hpp>
-#include <core/exceptions.hpp>
-#include <decorator_asset.hpp>
-#include <logger/logger.hpp>
+#include <formatters.hpp>
+#include <phosphor-logging/log.hpp>
+#include <status_provider.hpp>
 
 namespace app
 {
-namespace query
-{
 namespace obmc
+{
+namespace entity
 {
 
 using namespace app::entity;
 using namespace app::query;
-using namespace app::query::dbus;
+using namespace phosphor::logging;
 
-using namespace std::placeholders;
-using namespace app::entity::obmc::definitions;
-
-class NetworkAdapter final : public dbus::FindObjectDBusQuery
+class NetAdapter final :
+    public entity::Collection,
+    public CachedSource,
+    public NamedEntity<NetAdapter>
 {
-    static constexpr const char* netAdpService = "com.yadro.NetworkAdapter";
-    static constexpr const char* invNetAdpIface =
-        "xyz.openbmc_project.Inventory.Item.NetworkInterface";
-    static constexpr const char* stateOpStatusIface =
-        "xyz.openbmc_project.State.Decorator.OperationalStatus";
-    static constexpr const char* invItemIface =
-        "xyz.openbmc_project.Inventory.Item";
+  public:
+    enum class State
+    {
+        enabled,
+        absent
+    };
 
-    static constexpr const char* propName = "PrettyName";
-    static constexpr const char* propPresent = "Present";
-    static constexpr const char* propFunctional = "Functional";
-    static constexpr const char* propMac = "MACAddress";
+    ENTITY_DECL_FIELD(std::string, Name)
+    ENTITY_DECL_FIELD(std::string, Manufacturer)
+    ENTITY_DECL_FIELD(std::string, Model)
+    ENTITY_DECL_FIELD(std::string, MAC)
+    ENTITY_DECL_FIELD_ENUM(State, State, absent)
+  private:
+    class Query final : public dbus::FindObjectDBusQuery
+    {
+        static constexpr const char* netAdpService = "com.yadro.NetworkAdapter";
+        static constexpr const char* invNetAdpIface =
+            "xyz.openbmc_project.Inventory.Item.NetworkInterface";
+        static constexpr const char* stateOpStatusIface =
+            "xyz.openbmc_project.State.Decorator.OperationalStatus";
+        static constexpr const char* invItemIface =
+            "xyz.openbmc_project.Inventory.Item";
 
-    static constexpr const char* fieldName = "Name";
-    static constexpr const char* fieldPresent = "Present";
-    static constexpr const char* fieldFunctional = "Functional";
-    static constexpr const char* fieldEnabled = "Enabled";
-    static constexpr const char* fieldManufacturer = "Manufacturer";
-    static constexpr const char* fieldModel = "Model";
-    static constexpr const char* fieldMac = "MAC";
+        static constexpr const char* propName = "PrettyName";
+        static constexpr const char* propMac = "MACAddress";
+
+        class FormatState : public query::dbus::IFormatter
+        {
+          public:
+            ~FormatState() override = default;
+
+            const DbusVariantType format(const PropertyName&,
+                                         const DbusVariantType& value) override
+            {
+                State state = State::absent;
+                if (std::holds_alternative<bool>(value) &&
+                    std::get<bool>(value))
+                {
+                    state = State::enabled;
+                }
+                return static_cast<int>(state);
+            }
+        };
+
+      public:
+        Query() : dbus::FindObjectDBusQuery()
+        {}
+        ~Query() override = default;
+
+        DBUS_QUERY_DECL_EP(
+            DBUS_QUERY_EP_IFACES(general::assets::assetInterface,
+                                 DBUS_QUERY_EP_FIELDS_ONLY2(fieldManufacturer),
+                                 DBUS_QUERY_EP_FIELDS_ONLY2(fieldModel)),
+            DBUS_QUERY_EP_IFACES(
+                invItemIface, DBUS_QUERY_EP_FIELDS_ONLY(propName, fieldName),
+                DBUS_QUERY_EP_SET_FORMATTERS("Present", fieldState,
+                                             DBUS_QUERY_EP_CSTR(FormatState))),
+            DBUS_QUERY_EP_IFACES(invNetAdpIface,
+                                 DBUS_QUERY_EP_FIELDS_ONLY(propMac, fieldMAC)),
+            DBUS_QUERY_EP_IFACES(
+                stateOpStatusIface,
+                DBUS_QUERY_EP_SET_FORMATTERS(
+                    "Functional", StatusProvider::fieldStatus,
+                    DBUS_QUERY_EP_CSTR(StatusProvider::StatusByFunctional))))
+      protected:
+        DBUS_QUERY_DECLARE_CRITERIA(
+            "/xyz/openbmc_project/inventory/system/network/adapter/",
+            DBUS_QUERY_CRIT_IFACES(invNetAdpIface), nextOneDepth, netAdpService)
+
+        const DefaultFieldsValueDict& getDefaultFieldsValue() const override
+        {
+            static const DefaultFieldsValueDict defaults{
+                StatusRollup::defaultGetter<NetAdapter>(),
+                StatusFromRollup::defaultGetter<NetAdapter>(),
+            };
+            return defaults;
+        }
+    };
 
   public:
-    static const std::vector<std::string> fields;
-    static constexpr const char* entityName = "NetworkAdapters";
-
-    NetworkAdapter() : dbus::FindObjectDBusQuery()
+    NetAdapter() : Collection(), query(std::make_shared<Query>())
     {}
-    ~NetworkAdapter() override = default;
-
-    const dbus::DBusPropertyEndpointMap& getSearchPropertiesMap() const override
-    {
-        static const dbus::DBusPropertyEndpointMap dictionary{
-            {
-                general::assets::assetInterface,
-                {
-                    {general::assets::propertyManufacturer, fieldManufacturer},
-                    {general::assets::propertyModel, fieldModel},
-                },
-            },
-            {
-                invItemIface,
-                {
-                    {propName, fieldName},
-                    {propPresent, fieldPresent},
-                },
-            },
-            {
-                invNetAdpIface,
-                {
-                    {propMac, fieldMac},
-                },
-            },
-            {
-                stateOpStatusIface,
-                {
-                    {propFunctional, fieldFunctional},
-                },
-            },
-        };
-
-        return dictionary;
-    }
+    ~NetAdapter() override = default;
 
   protected:
-    const DBusObjectEndpoint& getQueryCriteria() const override
-    {
-        static const DBusObjectEndpoint criteria{
-            "/xyz/openbmc_project/inventory/system/network/adapter/",
-            {invNetAdpIface},
-            nextOneDepth,
-            netAdpService,
-        };
-
-        return criteria;
-    }
-
-    void setEnabled(DBusInstancePtr& instance) const
-    {
-        // default enabled
-        bool enabled = true;
-        try
-        {
-            bool functional =
-                instance->getField(fieldFunctional)->getBoolValue();
-            bool present = instance->getField(fieldPresent)->getBoolValue();
-
-            enabled = (functional && present);
-        }
-        catch (const std::exception& e)
-        {
-            // Some instance might haven't functional or present fields, because
-            // separate interfaces might incoming by separate instance-objects.
-            // So keep pass throught such cases.
-        }
-        instance->supplementOrUpdate(fieldEnabled, enabled);
-    }
-
-    void supplementByStaticFields(DBusInstancePtr& instance) const override
-    {
-        this->setEnabled(instance);
-    }
+    ENTITY_DECL_QUERY(query)
+  private:
+    DBusQueryPtr query;
 };
 
-const std::vector<std::string> NetworkAdapter::fields{
-    fieldName, fieldManufacturer, fieldModel,   fieldEnabled,
-    fieldMac,  fieldFunctional,   fieldPresent,
-};
-
+} // namespace entity
 } // namespace obmc
-} // namespace query
 } // namespace app
